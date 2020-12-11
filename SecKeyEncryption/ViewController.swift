@@ -11,38 +11,28 @@ class ViewController: UIViewController {
     let message = "this is a sensitive message"
     let signedMesssag = "this is a signed message"
     let enclaveKeyTag = "mySecureEnclaveKeyTag"
+    let encryptedPrivateKeyTag = "my.private.key.tag"
     let access = SecAccessControlCreateWithFlags(kCFAllocatorDefault,
                                                  kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
                                                  [.privateKeyUsage,.biometryAny],
                                                  nil)!
-    lazy var secEnclaveTag = enclaveKeyTag.data(using: .utf8)! //1
-    lazy var privateKeyParams: [String: AnyObject] = [
-        kSecAttrIsPermanent as String: true as AnyObject,
-        kSecAttrApplicationTag as String: secEnclaveTag as AnyObject,
-        kSecAttrAccessControl as String: access
-    ]
-    lazy var attributes = [
-        kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
-        kSecAttrKeySizeInBits as String: 256,
-        kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave,
-        kSecPrivateKeyAttrs as String: privateKeyParams
-    ] as CFDictionary
+    lazy var signedPrivateKeyParam: [String: Any] = [kSecClass as String: kSecClassKey,
+                                                     kSecAttrApplicationTag as String: enclaveKeyTag,
+                                                     kSecReturnRef as String: true,
+                                                     kSecAttrAccessControl as String: access]
     
-    lazy var getQuery: [String: Any] = [kSecClass as String: kSecClassKey,
-                                   kSecAttrApplicationTag as String: enclaveKeyTag,
-                                   kSecReturnRef as String: true,
-                                   kSecAttrAccessControl as String: access
-                                ]
-    
-    private var publicKeySec, privateKeySec: SecKey?
-
+    lazy var encryptedPrivateKeyParam: [NSObject: Any] = [kSecAttrCanDecrypt : true,
+                                                          kSecAttrIsPermanent : true,
+                                                          kSecAttrApplicationTag : encryptedPrivateKeyTag,
+                                                          kSecClass: kSecClassKey,
+                                                          kSecReturnRef: true]
     override func viewDidLoad() {
         super.viewDidLoad()
-        executeSignMsg()
+        executeSigning()
         executeAsymmetricEncryption()
     }
     
-    private func executeSignMsg() {
+    private func executeSigning() {
         guard let privateKey = createSignedKey(), let publicKey = SecKeyCopyPublicKey(privateKey) else {
             print("Public key generation error")
             return
@@ -50,14 +40,21 @@ class ViewController: UIViewController {
 
         guard let signedString = signMessage(privateKey: privateKey) else { return }
         let isSuccess = verifySignedMessageString(publicKey: publicKey, signedString: signedString)
-        print("verify signed message: ", isSuccess)
+        print("verify signed message: ", isSuccess ? "succcess" : "fail")
     }
     
     private func createSignedKey() -> SecKey?{
         //Creating the Access Control Object
+        let attributes = [
+            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecAttrKeySizeInBits as String: 256,
+            kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave,
+            kSecPrivateKeyAttrs as String: signedPrivateKeyParam
+        ] as CFDictionary
+        
         var item: CFTypeRef?
         var key: SecKey?
-        let status = SecItemCopyMatching(getQuery as CFDictionary, &item)
+        let status = SecItemCopyMatching(signedPrivateKeyParam as CFDictionary, &item)
         if status == errSecSuccess {
             key = (item as! SecKey)
         } else if status == errSecItemNotFound {
@@ -68,7 +65,7 @@ class ViewController: UIViewController {
             }
             key = newKey
         } else {
-            print("key query failed")
+            print("signed key query failed: ", status)
         }
         return key
     }
@@ -113,12 +110,27 @@ class ViewController: UIViewController {
     }
     
     private func executeAsymmetricEncryption() {
-        (publicKeySec, privateKeySec) = generateSecKeyPair()
-        guard let publicKey = publicKeySec, let privateKey = privateKeySec else {
-            print("invalid key pair")
-            return
+        var item: CFTypeRef?
+        var key: SecKey?
+        let status = SecItemCopyMatching(encryptedPrivateKeyParam as CFDictionary, &item)
+        if status == errSecSuccess {
+            key = (item as! SecKey)
+            guard let privateKey = key, let publicKey = SecKeyCopyPublicKey(privateKey) else { return }
+            encryptDecryptMessage(publicKey: publicKey, privateKey: privateKey)
+            deleteKey(query: encryptedPrivateKeyParam as CFDictionary)
+        } else if status == errSecItemNotFound {
+            let (publicKeySec, privateKeySec) = generateSecKeyPair()
+            guard let publicKey = publicKeySec, let privateKey = privateKeySec else {
+                print("invalid encryption key pair")
+                return
+            }
+            encryptDecryptMessage(publicKey: publicKey, privateKey: privateKey)
+        } else {
+            print("encryption key query failed: ", status)
         }
-
+    }
+    
+    private func encryptDecryptMessage(publicKey: SecKey, privateKey: SecKey) {
         if let encryptedMessage = encryptMessage(key: publicKey) {
             if let decryptedMessage = decryptMessage(key: privateKey, encryptedMessage: encryptedMessage) {
                 if decryptedMessage == message {
@@ -137,7 +149,7 @@ class ViewController: UIViewController {
                     messageData as CFData,
                     nil)
         else {
-            print("Encryption Error")
+            print("Encryption message  error")
             return nil
         }
         
@@ -150,12 +162,12 @@ class ViewController: UIViewController {
                 SecKeyAlgorithm.eciesEncryptionStandardX963SHA256AESGCM,
                 encryptMessageData as CFData,
                 nil) else {
-            print("Decryption Error")
+            print("Decryption message Error")
             return nil
         }
         
         guard let decryptedMessage = String(data: decryptData as Data, encoding: String.Encoding.utf8) else {
-            print("Error retrieving string")
+            print("Error retrieving decrypted string")
             return nil
         }
         return decryptedMessage
@@ -164,18 +176,10 @@ class ViewController: UIViewController {
     private func generateSecKeyPair() -> (publicKey: SecKey?, privateKey: SecKey?){
         var publicKeySec, privateKeySec: SecKey?
         //Generating both the public and private keys via the SecGeneratePair APIs.
-        let privateKeyTag = "my.private.key.tag".data(using: .utf8)!
-        let privateKeyParams: [String: Any] = [
-        kSecAttrCanDecrypt as String: true,
-        kSecAttrIsPermanent as String: true,
-        kSecAttrApplicationTag as String: privateKeyTag]
-
-
-        let attributes =
-        [kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
-        kSecAttrKeySizeInBits as String: 256,
-        kSecPrivateKeyAttrs as String:
-        privateKeyParams] as CFDictionary
+        let attributes = [  kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+                            kSecAttrKeySizeInBits as String: 256,
+                            kSecPrivateKeyAttrs as String: encryptedPrivateKeyParam,
+                        ] as CFDictionary
         let status = SecKeyGeneratePair(attributes, &publicKeySec, &privateKeySec)
         if status < 0 {
             print("generate sec key pair error: ", status)
@@ -186,8 +190,8 @@ class ViewController: UIViewController {
         }
     }
     
-    private func deleteKey() {
-        let delStatus = SecItemDelete(getQuery as CFDictionary)
+    private func deleteKey(query: CFDictionary) {
+        let delStatus = SecItemDelete(query)
         if delStatus == errSecSuccess {
            print("deleted key")
         } else {
