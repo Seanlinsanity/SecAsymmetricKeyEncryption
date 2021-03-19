@@ -9,9 +9,9 @@ import UIKit
 
 class ViewController: UIViewController {
     let message = "this is a sensitive message"
-    let signedMesssag = "this is a signed message"
+    let unsignedMesssage = "this is a message required signing"
     let enclaveKeyTag = "mySecureEnclaveKeyTag"
-    let encryptedPrivateKeyTag = "my.private.key.tag"
+    let customKeyTag = "my.keypair.tag"
     let access = SecAccessControlCreateWithFlags(kCFAllocatorDefault,
                                                  kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
                                                  [.privateKeyUsage,.biometryAny],
@@ -21,11 +21,11 @@ class ViewController: UIViewController {
                                                      kSecReturnRef as String: true,
                                                      kSecAttrAccessControl as String: access]
     
-    lazy var encryptedPrivateKeyParam: [NSObject: Any] = [kSecAttrCanDecrypt : true,
-                                                          kSecAttrIsPermanent : true,
-                                                          kSecAttrApplicationTag : encryptedPrivateKeyTag,
-                                                          kSecClass: kSecClassKey,
-                                                          kSecReturnRef: true]
+    lazy var privateKeyAttributes: [NSObject: Any] = [kSecAttrCanDecrypt : true,
+                                                      kSecAttrIsPermanent : true,
+                                                      kSecAttrApplicationTag : customKeyTag,
+                                                      kSecClass: kSecClassKey,
+                                                      kSecReturnRef: true]
     override func viewDidLoad() {
         super.viewDidLoad()
         executeSigning()
@@ -71,7 +71,7 @@ class ViewController: UIViewController {
     }
     
     private func signMessage(privateKey: SecKey) -> String? {
-        guard let messageData = signedMesssag.data(using: String.Encoding.utf8) else {
+        guard let messageData = unsignedMesssage.data(using: String.Encoding.utf8) else {
             print("Invalid message to sign.")
             return nil
         }
@@ -92,7 +92,7 @@ class ViewController: UIViewController {
     }
     
     private func verifySignedMessageString(publicKey:SecKey, signedString: String) -> Bool {
-        guard let messageData = signedMesssag.data(using: String.Encoding.utf8) else {
+        guard let messageData = unsignedMesssage.data(using: String.Encoding.utf8) else {
             print("Invalid message to sign.")
             return false
         }
@@ -112,12 +112,12 @@ class ViewController: UIViewController {
     private func executeAsymmetricEncryption() {
         var item: CFTypeRef?
         var key: SecKey?
-        let status = SecItemCopyMatching(encryptedPrivateKeyParam as CFDictionary, &item)
+        let status = SecItemCopyMatching(privateKeyAttributes as CFDictionary, &item)
         if status == errSecSuccess {
             key = (item as! SecKey)
             guard let privateKey = key, let publicKey = SecKeyCopyPublicKey(privateKey) else { return }
             encryptDecryptMessage(publicKey: publicKey, privateKey: privateKey)
-            deleteKey(query: encryptedPrivateKeyParam as CFDictionary)
+            deleteKey(query: privateKeyAttributes as CFDictionary)
         } else if status == errSecItemNotFound {
             let (publicKeySec, privateKeySec) = generateSecKeyPair()
             guard let publicKey = publicKeySec, let privateKey = privateKeySec else {
@@ -131,8 +131,9 @@ class ViewController: UIViewController {
     }
     
     private func encryptDecryptMessage(publicKey: SecKey, privateKey: SecKey) {
-        if let encryptedMessage = encryptMessage(key: publicKey) {
-            if let decryptedMessage = decryptMessage(key: privateKey, encryptedMessage: encryptedMessage) {
+        if let encryptedMessage = encryptMessage(publicKey: publicKey) {
+            print("encrypted msg: ", encryptedMessage)
+            if let decryptedMessage = decryptMessage(privateKey: privateKey, encryptedMessage: encryptedMessage) {
                 if decryptedMessage == message {
                     print("decrypt successfully, message: ", decryptedMessage)
                 } else {
@@ -142,9 +143,9 @@ class ViewController: UIViewController {
         }
     }
     
-    private func encryptMessage(key: SecKey) -> String? {
+    private func encryptMessage(publicKey: SecKey) -> String? {
         guard let messageData = message.data(using: String.Encoding.utf8), let encryptData = SecKeyCreateEncryptedData(
-                    key,
+                    publicKey,
                     SecKeyAlgorithm.eciesEncryptionStandardX963SHA256AESGCM,
                     messageData as CFData,
                     nil)
@@ -153,12 +154,14 @@ class ViewController: UIViewController {
             return nil
         }
         
-        return (encryptData as Data).base64EncodedString()
+        let encryptedMsg = (encryptData as Data).base64EncodedString()
+        print(encryptedMsg)
+        return encryptedMsg
     }
     
-    private func decryptMessage(key: SecKey, encryptedMessage: String) -> String? {
+    private func decryptMessage(privateKey: SecKey, encryptedMessage: String) -> String? {
         guard let encryptMessageData = Data(base64Encoded: encryptedMessage), let decryptData = SecKeyCreateDecryptedData(
-                key,
+                privateKey,
                 SecKeyAlgorithm.eciesEncryptionStandardX963SHA256AESGCM,
                 encryptMessageData as CFData,
                 nil) else {
@@ -173,12 +176,12 @@ class ViewController: UIViewController {
         return decryptedMessage
     }
     
-    private func generateSecKeyPair() -> (publicKey: SecKey?, privateKey: SecKey?){
+    private func generateSecKeyPair() -> (publicKey: SecKey?, privateKey: SecKey?) {
         var publicKeySec, privateKeySec: SecKey?
         //Generating both the public and private keys via the SecGeneratePair APIs.
         let attributes = [  kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
                             kSecAttrKeySizeInBits as String: 256,
-                            kSecPrivateKeyAttrs as String: encryptedPrivateKeyParam,
+                            kSecPrivateKeyAttrs as String: privateKeyAttributes,
                         ] as CFDictionary
         let status = SecKeyGeneratePair(attributes, &publicKeySec, &privateKeySec)
         if status < 0 {
